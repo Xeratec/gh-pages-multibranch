@@ -3,10 +3,10 @@
 # easily reuse.
 
 name: gh-pages multibranch
-description: Manage multiple branches in gh-pages
+description: Manage multiple branches and tags in gh-pages
 
 inputs:
-  directory:  # id of input
+  directory:
     description: 'Directory to multiplex in, also source'
     required: true
     default: 'public'
@@ -17,200 +17,151 @@ inputs:
     description: "Default branch of the repo (to get the default site)"
     default: 'main'
   publish_branch:
-    description: "Github Pages branch"
+    description: "GitHub Pages branch"
     default: 'gh-pages'
+
 runs:
   using: "composite"
   steps:
-    - name: Info
-      shell: bash
-      env:
-        event_name: ${{ github.event_name }}
-        ref: ${{ github.ref }}
-        head_ref: ${{ github.head_ref }}
-        base_ref: ${{ github.base_ref }}
-        default_branch: ${{inputs.default_branch}}
-      run: |
-        echo "Debugging info"
-        set -x
-        echo event_name: "${event_name}"
-        echo github.ref: "${ref}"
-        echo github.base_ref: "${head_ref}"
-        echo github.head_ref: "${base_ref}"
-        echo refs/heads/+ inputs.default_branch: "refs/heads/${default_branch}"
-        echo github.event_name == 'push' , github.ref == "refs/heads/${default_branch}"
-        git branch -avv
-        git rev-parse --verify gh-pages || true
-        git rev-parse --verify remotes/origin/main || true
-        git rev-parse --verify remotes/origin/gh-pages || true
-        git rev-parse --verify remotes/origin/br1 || true
     - name: Make temporary directory
       id: mktmpdir
-      if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
       shell: bash
       run: |
-        #echo "::set-output name=tmpdir::$(mktemp -d)"
+        set -x
         echo "tmpdir=$(mktemp -d)" >> $GITHUB_OUTPUT
-    - name: Assemble variables
-      id: variables
-      if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
-      shell: bash
-      env:
-        default_branch: ${{inputs.default_branch}}
-      run: |
-        #echo "::set-output name=refheads_default_branch::refs/heads/${default_branch}"
-        echo "refheads_default_branch=refs/heads/${default_branch}" >> $GITHUB_OUTPUT
+
     - name: Find CNAME
       id: cname
-      if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
       shell: bash
       env:
         inputs_cname: ${{inputs.cname}}
         directory: ${{inputs.directory}}
       run: |
-        if [ -n "${inputs_cname}" ] ; then
-            echo "CNAME from the action input"
-            #echo "::set-output name=cname::${inputs_cname}"
-            echo "cname=${inputs_cname}" >> $GITHUB_OUTPUT
-            exit 0
-        elif [ -e "${directory}/CNAME" ] ; then
-            echo "CNAME from the publish directory ${directory}"
-            #echo "::set-output name=cname::$(cat ${directory}/CNAME)"
-            echo "cname=$(cat ${directory}/CNAME)" >> $GITHUB_OUTPUT
-            exit 0
-        elif [ -e CNAME ] ; then
-            echo "CNAME from repository root"
-            #echo "::set-output name=cname::$(cat CNAME)"
-            echo "name=cname=$(cat CNAME)" >> $GITHUB_OUTPUT
-            exit 0
+        set -x
+        if [ -n "${inputs_cname}" ]; then
+          echo "cname=${inputs_cname}" >> $GITHUB_OUTPUT
+        elif [ -e "${directory}/CNAME" ]; then
+          echo "cname=$(cat ${directory}/CNAME)" >> $GITHUB_OUTPUT
+        elif [ -e CNAME ]; then
+          echo "cname=$(cat CNAME)" >> $GITHUB_OUTPUT
+        else
+          echo "cname=" >> $GITHUB_OUTPUT
         fi
-        echo "CNAME not found"
-        #echo "::set-output name=cname::"
-        echo "cname=" >> $GITHUB_OUTPUT
-    # Clone the old gh-pages branch and copy that to tmpdir, this is
-    # the base deployment (we keep all old pages)
+
     - name: Clone old gh-pages
-      if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
       shell: bash
       env:
         publish_branch: ${{inputs.publish_branch}}
         tmpdir: ${{steps.mktmpdir.outputs.tmpdir}}
       run: |
-        echo "Clone old gh-pages branch"
         set -x
         git fetch
-        if git rev-parse --verify "remotes/origin/${publish_branch}" ; then
+        if git rev-parse --verify "remotes/origin/${publish_branch}"; then
           git branch -- "${publish_branch}" "remotes/origin/${publish_branch}"
           git clone . "--branch=${publish_branch}" ${tmpdir}
-        else
-          # no branch exists so don't start with anything
-          true
         fi
-        rm -rf -- "${tmpdir}/.git/"
-        mkdir -p -- "${tmpdir}/branch/"
-    # If a push and default branch, copy build to _gh-pages/ as the "main"
-    # deployment.
-    - name: Copy new build (default branch)
-      id: copy_build_default_branch
-      if: ${{ (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && github.ref == steps.variables.outputs.refheads_default_branch }}
-      shell: bash
-      env:
-        directory: ${{inputs.directory}}
-        cname: ${{ steps.cname.outputs.cname }}
-        tmpdir: ${{ steps.mktmpdir.outputs.tmpdir }}
-      run: |
-        echo "Copy build on default branch"
-        set -x
-        # Delete everything under _gh-pages/ that is from the
-        # primary branch deployment.  Includes the other branches
-        # _gh-pages/branch-* paths, and not including
-        # _gh-pages itself.
-        ( cd "${tmpdir}" &&
-          find . -mindepth 1 ! -path './branch' ! -path './branch/*' -delete
-        )
-        rsync -raiv -- "${directory}/" "${tmpdir}/"
-        if [ -n "${cname}" ] ; then
-            echo "preview_link=https://${cname}/" >> $GITHUB_OUTPUT
-            echo ::notice "title=Preview link::Default site available at https://${cname}/"
-        else
-            echo "preview_link=https://$GITHUB_REPOSITORY_OWNER.github.io/${GITHUB_REPOSITORY#*/}/" >> $GITHUB_OUTPUT
-            echo ::notice "title=Preview link::Default site available at https://$GITHUB_REPOSITORY_OWNER.github.io/${GITHUB_REPOSITORY#*/}/"
-        fi
-    # If a push and not on default branch, then copy the build to
-    # _gh-pages/branch/$brname (transforming '/' into '--')
-    - name: Copy new build (non-default branch)
-      id: copy_build_nondefault_branch
-      if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+        rm -rf "${tmpdir}/.git"
+        mkdir -p "${tmpdir}/branch" "${tmpdir}/tag"
+
+    - name: Deploy new build
+      id: deploy
       shell: bash
       env:
         ref: ${{github.ref}}
+        ref_type: ${{github.ref_type}}
+        default_branch: ${{inputs.default_branch}}
         tmpdir: ${{steps.mktmpdir.outputs.tmpdir}}
-        cname: ${{ steps.cname.outputs.cname }}
         directory: ${{inputs.directory}}
+        cname: ${{steps.cname.outputs.cname}}
       run: |
-        echo "Copy build branch/ directory"
         set -x
-        #brname=$(git rev-parse --abbrev-ref HEAD)
-        brname="${ref}"
-        brname="${brname##refs/heads/}"
-        brdir="${brname//\//--}"   # replace '/' with '--'
-        rm -rf -- "${tmpdir}/branch/${brdir}"
-        rsync -raiv -- "${directory}/" "${tmpdir}/branch/${brdir}/"
-        if [ -n "${cname}" ] ; then
-            echo "preview_link=https://${cname}/branch/${brdir}/" >> $GITHUB_OUTPUT
-            echo ::notice "title=Branch preview link::Branch can be previewed at https://${cname}/branch/${brdir}/"
-        else
-            echo "preview_link=https://$GITHUB_REPOSITORY_OWNER.github.io/${GITHUB_REPOSITORY#*/}/branch/${brdir}/" >> $GITHUB_OUTPUT
-            echo ::notice "title=Branch preview link::Branch can be previewed at https://$GITHUB_REPOSITORY_OWNER.github.io/${GITHUB_REPOSITORY#*/}/branch/${brdir}/"
+        if [[ "$ref" == "refs/heads/${default_branch}" ]]; then
+          target_dir="${tmpdir}"
+          find "${tmpdir}" -mindepth 1 ! -path './branch*' ! -path './tag*' -delete
+          rsync -raiv "${directory}/" "$target_dir/"
+          preview_path=""
+        elif [[ "$ref" =~ ^refs/heads/(.+)$ ]]; then
+          branch_name=${BASH_REMATCH[1]}
+          branch_dir="${branch_name//\//--}"
+          target_dir="${tmpdir}/branch/${branch_dir}"
+          rm -rf "$target_dir"
+          rsync -raiv "${directory}/" "$target_dir/"
+          preview_path="branch/${branch_dir}/"
+        elif [[ "$ref" =~ ^refs/tags/(.+)$ ]]; then
+          tag_name=${BASH_REMATCH[1]}
+          tag_dir="${tag_name//\//--}"
+          target_dir="${tmpdir}/tag/${tag_dir}"
+          rm -rf "$target_dir"
+          rsync -raiv "${directory}/" "$target_dir/"
+          preview_path="tag/${tag_dir}/"
         fi
-    # Go through each branch in _gh-pages/branch/, if it's not a
-    # ref, then delete it.
-    - name: Delete old feature branches
-      if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
+
+        site_root="https://${cname:-${GITHUB_REPOSITORY_OWNER}.github.io/${GITHUB_REPOSITORY#*/}}"
+        preview_link="$site_root/"
+        echo "preview_link=${preview_link}" >> $GITHUB_OUTPUT
+        echo "site_root=${site_root}" >> $GITHUB_OUTPUT
+        echo ::notice "title=Preview link::Site available at ${preview_link}"
+
+    - name: Clean old branches and tags
       shell: bash
       env:
-        tmpdir: ${{ steps.mktmpdir.outputs.tmpdir }}
+        tmpdir: ${{steps.mktmpdir.outputs.tmpdir}}
       run: |
-        echo "Delete old feature branches"
         set -x
-        for brdir in ${tmpdir}/branch/* ; do
-            # no matching files gives only the pattern back, exclude it
-            if [ ! -e "$brdir" ] ; then continue ; fi
-            # Find the branch name from filename
-            brname="${brdir##*/}"   # strip leading */
-            brname="${brname//--/\/}"   # replace '--' with '/'
-            # Verify existence or remove
-            if ! git rev-parse --verify "remotes/origin/$brname" ; then
-                echo "Removing $brdir"
-                rm -r -- "$brdir/"
-            fi
+        for brdir in ${tmpdir}/branch/*; do
+          [ ! -e "$brdir" ] && continue
+          brname=${brdir##*/}
+          brname=${brname//--/\/}
+          git rev-parse --verify "remotes/origin/$brname" || rm -rf "$brdir"
         done
-    # Rsync the whole multiplexed path back to the original input
-    # directory
+        for tagdir in ${tmpdir}/tag/*; do
+          [ ! -e "$tagdir" ] && continue
+          tagname=${tagdir##*/}
+          tagname=${tagname//--/\/}
+          git rev-parse --verify "refs/tags/$tagname" || rm -rf "$tagdir"
+        done
+
+    - name: Generate versions.html
+      shell: bash
+      env:
+        tmpdir: ${{steps.mktmpdir.outputs.tmpdir}}
+        cname: ${{steps.cname.outputs.cname}}
+        site_root: ${{steps.deploy.outputs.site_root}}
+      run: |
+        set -x
+        {
+          echo "<html><body><h1>Deployed Versions</h1><ul>"
+          echo "<li><a href=\"${site_root}\">Default Branch (${{inputs.default_branch}})</a></li>"
+          for path in branch tag; do
+            for dir in ${tmpdir}/$path/*; do
+              [ ! -e "$dir" ] && continue
+              name=$(basename "$dir")
+              url="$site_root/$path/$name/"
+              echo "<li><a href=\"$url\">$path: ${name//--/\/}</a></li>"
+            done
+          done
+          echo "</ul></body></html>"
+        } > "${tmpdir}/versions.html"
+
     - name: Copy multipages directory back
-      if: ${{ github.event_name == 'push' || github.event_name == 'workflow_dispatch' }}
       shell: bash
       env:
         directory: ${{inputs.directory}}
-        tmpdir: ${{ steps.mktmpdir.outputs.tmpdir }}
+        tmpdir: ${{steps.mktmpdir.outputs.tmpdir}}
       run: |
-        echo "Copy multipages directory back"
         set -x
-        rm -r -- "${directory}"
-        rsync -raiv -- "${tmpdir}/" "${directory}/"
-    - name: Generate preview link summary
+        rm -rf "${directory}"
+        rsync -raiv "${tmpdir}/" "${directory}/"
+
+    - name: Generate preview summary
       shell: bash
       env:
-        preview_link:  ${{ steps.copy_build_default_branch.outputs.preview_link }}
-        preview_link2: ${{ steps.copy_build_nondefault_branch.outputs.preview_link }}
+        preview_link: ${{steps.deploy.outputs.preview_link}}
+        site_root: ${{steps.deploy.outputs.site_root}}
       run: |
-        # Use link from either the default branch step or nondefault
-        # branch step, whichever is set.
-        echo $preview_link , $preview_link2
-        preview_link=${preview_link:=${preview_link2}}
-        echo $preview_link
-
+        set -x
         cat << EOF >> $GITHUB_STEP_SUMMARY
         # Preview link
-        Preview the site corresponding to this commit at <${preview_link}> .
+        Preview this site at <${preview_link}> .
+        You can also find the versions at <${site_root}/versions.html> .
         EOF
